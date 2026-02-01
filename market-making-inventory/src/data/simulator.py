@@ -10,12 +10,17 @@ class SimulationConfig:
     dt: float = 1/2520      # Time step (e.g. 10 steps per day if 1/252 is daily)
     sigma: float = 0.2      # Volatility
     seed: int = 42
+    k: float = 1.5          # Liquidity parameter (decay)
+    A: float = 140.0        # Order arrival intensity
+    maker_fee: float = 0.0  # Transaction fee ratio (e.g. 0.0001 for 1bp)
+    allow_sniping: bool = False # If True, allows "toxic" fills when price jumps
 
 class OrderBookSimulator:
     """
     Simulates a simplified Limit Order Book with:
     - Mid-price following Arithmetic Brownian Motion
     - Probability of Fill based on quote distance (Poisson intensity)
+    - Optional: Transaction Fees and Toxic Flow (Sniping)
     """
     
     
@@ -46,25 +51,10 @@ class OrderBookSimulator:
     def step(self, delta_b: float, delta_a: float) -> Tuple[bool, bool, float]:
         """
         Advance one time step and determine if orders are filled.
-        
-        Args:
-            delta_b: Bid distance from mid-price (must be > 0)
-            delta_a: Ask distance from mid-price (must be > 0)
-            
-        Returns:
-            filled_buy (bool): True if bid was filled
-            filled_sell (bool): True if ask was filled
-            new_price (float): Updated mid-price
         """
         dt = self.config.dt
         sigma = self.config.sigma
-        
-        # 1. Update Price (Arithmetic Brownian Motion for simplicity in HJB context, or Geometric)
-        # Using Arithmetic dS = sigma * dW often matches Guéant paper assumptions better,
-        # but Geometric is more realistic. Let's strictly follow the S0 * exp(...) for realism
-        # unless user requested arithmetic. Math model said dS = sigma dW.
-        # Let's stick to dS = sigma * dW (Arithmetic) to match HJB derivation exactly.
-        
+        old_price = self.current_price
         
         # 1. Update Price
         if self.external_price_path is not None:
@@ -73,24 +63,20 @@ class OrderBookSimulator:
             if self.current_idx < len(self.external_price_path):
                 self.current_price = self.external_price_path[self.current_idx]
             else:
-                # End of path, just hold last price
                 pass
         else:
             # Simulation Mode (Brownian)
-            # dW ~ Normal(0, sqrt(dt))
             dW = self.rng.standard_normal() * np.sqrt(dt)
             self.current_price += sigma * dW 
         
         self.current_time += dt
         
         # 2. Determine Fills
-        # Lambda = A * exp(-k * delta)
-        # Prob of fill in dt approx = 1 - exp(-Lambda * dt)
+        # Use config parameters
+        A = self.config.A
+        k = self.config.k
         
-        # Constants from model (should ideally be passed in or config)
-        A = 140.0 
-        k = 1.5
-        
+        # Standard Poisson Fills
         lambda_b = A * np.exp(-k * delta_b)
         lambda_a = A * np.exp(-k * delta_a)
         
@@ -100,14 +86,42 @@ class OrderBookSimulator:
         filled_buy = self.rng.random() < prob_b
         filled_sell = self.rng.random() < prob_a
         
+        # --- 3. TOXIC FLOW / SNIPING Logic ---
+        # If price moved MORE than the spread, you get picked off by latency arbitrageurs.
+        # This overrides the probabilistic fill (you WILL be filled).
+        if self.config.allow_sniping:
+            price_move = self.current_price - old_price
+            
+            # If Price jumped UP > Ask spread -> We sold too cheap (Sniper bought from us)
+            if price_move > delta_a:
+                filled_sell = True
+                
+            # If Price crashed DOWN > Bid spread -> We bought too expensive (Sniper sold to us)
+            if price_move < -delta_b:
+                filled_buy = True
+
         # Update Inventory & Cash
+        # Apply Fees if any
+        fee_rate = self.config.maker_fee
+        
         if filled_buy:
+            exec_price = old_price - delta_b # We buy at our bid (relative to OLD price effectively in sim)
+            # Actually, in this discrete step, if we were sniped, we traded at old_price - delta_b
+            # while market is at current_price.
+            
+            # Correction: In standard step, we trade against flow.
+            # If using replay, current_price is the CLOSE of the candle/step?
+            # Let's assume trade happens at order price.
+            
+            transaction_cost = exec_price * fee_rate
             self.inventory += 1
-            self.cash -= (self.current_price - delta_b)
+            self.cash -= (exec_price + transaction_cost)
             
         if filled_sell:
+            exec_price = old_price + delta_a
+            transaction_cost = exec_price * fee_rate
             self.inventory -= 1
-            self.cash += (self.current_price + delta_a)
+            self.cash += (exec_price - transaction_cost)
             
         # Log state
         self._log_state()

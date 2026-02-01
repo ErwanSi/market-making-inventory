@@ -14,7 +14,7 @@ Avant de pouvoir exécuter le code, il faut préparer un environnement Python is
 ### Étape 1.1 : Ouvrir le terminal
 Ouvrez votre terminal (PowerShell ou Command Prompt) et naviguez jusqu'au dossier du projet :
 ```powershell
-cd c:\Users\Winwin\Desktop\MM\market-making-inventory
+cd c:\Users\YourPath\MM\market-making-inventory
 ```
 
 ### Étape 1.2 : Créer un environnement virtuel

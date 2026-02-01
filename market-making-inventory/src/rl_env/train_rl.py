@@ -1,7 +1,12 @@
+import sys
+import os
+
+# Add project root to path to allow imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from .market_making_env import MarketMakingEnv
-import os
+from src.rl_env.market_making_env import MarketMakingEnv
 
 def train_agent(total_timesteps=100000):
     """

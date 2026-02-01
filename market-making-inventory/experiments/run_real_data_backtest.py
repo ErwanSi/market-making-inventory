@@ -11,6 +11,7 @@ from src.data.simulator import OrderBookSimulator, SimulationConfig
 from src.data.real_data_fetcher import BinanceDataFetcher
 from src.models.inventory_hjb import InventoryHJBModel, MarketParameters
 from src.solvers.hjb_solver import HJBSolver
+from stable_baselines3 import PPO
 
 def run_real_backtest():
     print("Starting Real Data Backtest (Binance BTC/USDT)...")
@@ -38,13 +39,28 @@ def run_real_backtest():
     print(f"Estimated Annualized Volatility: {sigma_est:.2f}")
 
     # Configuration
-    config = SimulationConfig(S0=S0, T=T_horizon, dt=dt, sigma=sigma_est) 
-    params = MarketParameters(sigma=sigma_est, gamma=0.1, k=1.5, A=140.0)
+    # Calibrate Parameters for BTC (High Price, High Frequency)
+    scale_factor = S0 / 100.0
+    k_btc = 1.5 / scale_factor
+    A_btc = 500000.0 # High intensity for HFT frequency
+    
+    print(f"Calibrated Parameters: k={k_btc:.6f}, A={A_btc:.0f}")
+
+    config = SimulationConfig(S0=S0, T=T_horizon, dt=dt, sigma=sigma_est, k=k_btc, A=A_btc) 
+    params = MarketParameters(sigma=sigma_est, gamma=0.1, k=k_btc, A=A_btc)
     
     # Initialize Models
     hjb_model = InventoryHJBModel(params)
     solver_hjb = HJBSolver(params, max_inventory_Q=50) # Larger inventory for real BTC
     
+    # Load RL Model (if exists)
+    rl_model = None
+    if os.path.exists("models/ppo_market_maker.zip"):
+        print("Loading RL Model...")
+        rl_model = PPO.load("models/ppo_market_maker.zip")
+    else:
+        print("Warning: RL Model not found. Skipping RL strategy.")
+
     # Strategies definitions
     def strategy_naive(q, t_left):
         fixed_spread = S0 * 0.0005 # 5 bps
@@ -56,6 +72,24 @@ def run_real_backtest():
         # Use a minimum t_left to avoid singularity or keep it stationary
         safe_t = max(t_left, 0.01) 
         return solver_hjb.get_optimal_quotes(q, safe_t)
+        
+    def strategy_rl(q, t_left):
+        if rl_model is None:
+            return S0 * 0.01, S0 * 0.01 # Fallback
+            
+        current_time_norm = (T_horizon - t_left) / T_horizon
+        # Clip inventory to training range if necessary [-50, 50]
+        q_clipped = np.clip(q, -50, 50)
+        
+        obs = np.array([float(q_clipped), current_time_norm], dtype=np.float32)
+        action, _ = rl_model.predict(obs, deterministic=True)
+        # RL Output is spread [0, 5].
+        # BUT RL was trained on S=100. BTC S=90000.
+        # We need to scale the RL output spread to current price levels!
+        # Assuming RL learned "spread in dollars" for S=100.
+        # 1 unit spread at S=100 is 1%.
+        # So we scale by scale_factor
+        return action[0] * scale_factor, action[1] * scale_factor
 
     # Run Simulations
     results = {}
@@ -63,6 +97,8 @@ def run_real_backtest():
         'Naive Real': strategy_naive,
         'HJB Real': strategy_hjb_exact
     }
+    if rl_model:
+        strategies['RL Agent'] = strategy_rl
     
     for name, strat in strategies.items():
         print(f"Running {name}...")
